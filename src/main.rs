@@ -14,8 +14,7 @@ use tokio::{
     time
 };
 use std::{
-    io,
-    time::Duration
+    io, ops::Deref, time::Duration
 };
 use futures::StreamExt;
 use crossterm::{
@@ -33,7 +32,7 @@ use tracing_subscriber as ts;
 
 use crate::{
     llm::EndpointController,
-    model::Model
+    model::{Model, StreamingState, FocusState}
 };
 
 const MODEL: &str = "glm-5.2";
@@ -122,7 +121,7 @@ where
             },
 
             _ = tick.tick() => {
-                if model.is_streaming {
+                if model.streaming_state() == StreamingState::Streaming {
                     model.spinner_index = model.spinner_index.wrapping_add(1);
                 }
             }
@@ -160,7 +159,9 @@ fn handle_key(
     ec: &EndpointController,
 ) {
     // During streaming, only scrolling and quit are allowed.
-    if model.is_streaming {
+    if model.streaming_state() == StreamingState::Streaming
+        || model.streaming_state() == StreamingState::AwaitingStream
+    {
         match key.code {
             KeyCode::PageUp => model.scroll_up(),
             KeyCode::PageDown => model.scroll_down(),
@@ -194,7 +195,9 @@ fn handle_key(
             navigate_focus(model, textarea, 1);
         },
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-            if model.focus.is_none_or(|i| i == input_slot) {
+            if model.focus_state() == FocusState::Unfocused
+                || model.focus_state() == FocusState::Focused(input_slot)
+            {
                 model.focus_on(input_slot);
                 let text = textarea.lines().join("\n");
                 if model.flush_input(text) {
@@ -226,8 +229,8 @@ fn handle_key(
             }
         },
         KeyCode::Enter => {
-            if model.focus.is_none() {
-                model.focus_on(input_slot);
+            if model.focus_state() == FocusState::Unfocused {
+                model.set_focus_state(FocusState::Focused(input_slot));
             }
             model.snap();
             textarea.insert_newline();
@@ -239,9 +242,9 @@ fn handle_key(
             model.scroll_down();
         },
         _ => {
-            if model.focus.is_none() {
-                *textarea = cli::new_input_textarea("");
-                model.focus_on(input_slot);
+            if model.focus_state() == FocusState::Unfocused {
+                *textarea = cli::new_input_textarea(&*model.input_buffer());
+                model.set_focus_state(FocusState::Focused(input_slot));
             } else {
                 model.snap();
             }
@@ -249,8 +252,8 @@ fn handle_key(
         },
     }
 
-    // Sync textarea content back to the focused slot.
-    if let Some(idx) = model.focus {
+    // Sync focused slot content to textarea content
+    if let FocusState::Focused(idx) = model.focus_state() {
         let content = textarea.lines().join("\n");
         if idx < model.chat.len() {
             model.chat[idx].content = content;
@@ -272,17 +275,20 @@ fn navigate_focus(model: &mut Model, textarea: &mut TextArea<'_>, dir: i32) {
         return;
     }
 
-    let current_item = model.focus
-        .and_then(|f| focusable.iter().position(|&i| i == f));
-
-    let next_item = match current_item {
-        None => {
-            if dir > 0 { 0 } else { focusable.len() - 1 }
-        },
-        Some(p) => {
+    let next_item = match model.focus_state() {
+        FocusState::Focused(i)
+            if let Some(p) = focusable.iter().position(|pos| pos == &i)
+        => {
             let len = focusable.len();
-            ((p as i32 + dir).rem_euclid(len as i32)) as usize
+            let index = p as i32 + dir;
+            index.rem_euclid(len as i32) as usize
         },
+        _ if dir > 0 => {
+            0
+        },
+        _ => {
+            focusable.len() - 1
+        }
     };
 
     let next_idx = focusable[next_item];

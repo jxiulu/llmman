@@ -22,9 +22,14 @@ pub enum StreamingState {
 }
 
 #[derive(PartialEq, Eq, Clone)]
-pub enum UiState {
+pub enum FocusState {
     Focused(usize),
     Unfocused
+}
+
+pub enum ScrollState {
+    Following,
+    Fixed(u16)
 }
 
 pub struct Model {
@@ -35,11 +40,9 @@ pub struct Model {
     pub scroll: u16,
     pub should_follow: bool,
     pub should_snap: bool,
-    pub is_streaming: bool,
-    pub is_awaiting_stream: bool,
 
     pub streaming_state: StreamingState,
-    pub ui_state: UiState,
+    pub focus_state: FocusState,
 
     pub status: String,
     pub ui_status: Option<String>,
@@ -48,7 +51,6 @@ pub struct Model {
 
     pub quit_count: u16,
 
-    pub focus: Option<usize>,
     pub input_buffer: String,
 }
 
@@ -60,16 +62,17 @@ impl Model {
             should_follow: true,
             should_snap: false,
             streaming_state: StreamingState::Idle,
-            is_streaming: false,
-            is_awaiting_stream: false,
             status: "ready".to_string(),
             ui_status: None,
             spinner_index: 0,
             quit_count: 0,
-            focus: None,
             input_buffer: String::new(),
-            ui_state: UiState::Focused(0),
+            focus_state: FocusState::Focused(0),
         }
+    }
+
+    pub fn input_buffer(&self) -> &str {
+        &self.input_buffer
     }
 
     pub fn streaming_state(&self) -> StreamingState {
@@ -80,12 +83,12 @@ impl Model {
         self.streaming_state = s;
     }
 
-    pub fn ui_state(&self) -> UiState {
-        self.ui_state().clone()
+    pub fn focus_state(&self) -> FocusState {
+        self.focus_state.clone()
     }
 
-    pub fn set_ui_state(&mut self, s: UiState) {
-        self.ui_state = s;
+    pub fn set_focus_state(&mut self, s: FocusState) {
+        self.focus_state = s;
     }
 
     pub fn set_aux_status(&mut self, status: Option<&str>) {
@@ -105,9 +108,7 @@ impl Model {
     }
 
     pub fn focus_on(&mut self, idx: usize) {
-        self.focus = Some(idx);
-
-        self.set_ui_state(UiState::Focused(idx));
+        self.set_focus_state(FocusState::Focused(idx));
         self.should_snap = true;
         self.should_follow = false;
 
@@ -115,23 +116,18 @@ impl Model {
     }
 
     pub fn unfocus(&mut self) {
-        self.should_follow = self.focus == Some(self.chat.len());
-
-        self.should_follow = self.ui_state() == UiState::Focused(self.chat.len());
-        self.focus = None;
+        self.should_follow = self.focus_state() == FocusState::Focused(self.chat.len());
+        self.set_focus_state(FocusState::Unfocused);
 
         tracing::info!("model unfocused");
     }
 
     pub fn snap(&mut self) {
         self.should_snap = true;
-        if self.focus.is_none() {
-            self.focus = Some(self.chat.len());
+        if self.focus_state() == FocusState::Unfocused {
+            self.set_focus_state(FocusState::Focused(self.chat.len()));
         }
 
-        if self.ui_state() == UiState::Unfocused {
-            self.set_ui_state(UiState::Focused(self.chat.len()));
-        }
         self.should_follow = false;
 
         tracing::info!("model snapped");
@@ -149,10 +145,9 @@ impl Model {
     }
 
     pub fn flush_input(&mut self, text: String) -> bool {
-        if self.is_streaming {
+        if self.streaming_state() == StreamingState::Streaming {
             return false;
         }
-
         if text.is_empty() && self.chat.is_empty() {
             return false;
         }
@@ -169,10 +164,9 @@ impl Model {
             content: String::new(),
         });
 
-        self.is_awaiting_stream = true;
-        self.is_streaming = true;
+        self.set_streaming_state(StreamingState::AwaitingStream);
         self.should_follow = true;
-        self.focus = None;
+        self.set_focus_state(FocusState::Unfocused);
         self.input_buffer = String::new();
         self.status = "streaming".to_string();
 
@@ -180,8 +174,8 @@ impl Model {
     }
 
     pub fn push_think_token(&mut self, token: &str) {
-        if self.is_awaiting_stream {
-            self.is_awaiting_stream = false;
+        if self.streaming_state() == StreamingState::AwaitingStream {
+            self.set_streaming_state(StreamingState::Streaming);
             if let Some(last) = self.chat.last_mut() {
                 last.kind = MessageKind::Thinking;
                 last.content = token.to_string();
@@ -197,8 +191,8 @@ impl Model {
     }
 
     pub fn push_stream_token(&mut self, token: &str) {
-        if self.is_awaiting_stream {
-            self.is_awaiting_stream = false;
+        if self.streaming_state() == StreamingState::AwaitingStream {
+            self.set_streaming_state(StreamingState::Streaming);
             if let Some(last) = self.chat.last_mut() {
                 last.kind = MessageKind::Response;
                 last.content = token.to_string();
@@ -220,7 +214,7 @@ impl Model {
     }
 
     pub fn finish_stream(&mut self) {
-        self.is_streaming = false;
+        self.set_streaming_state(StreamingState::Idle);
         self.should_follow = false;
         self.status = "ready".to_string();
     }
@@ -236,7 +230,7 @@ impl Model {
             kind: MessageKind::Error,
             content: msg.to_string(),
         });
-        self.is_streaming = false;
+        self.set_streaming_state(StreamingState::Idle);
         self.should_follow = false;
         self.status = "error".to_string();
     }

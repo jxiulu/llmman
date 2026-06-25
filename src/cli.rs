@@ -19,7 +19,7 @@ use tui_textarea::{CursorMove, TextArea, WrapMode};
 
 use crate::model::{
     self,
-    MessageKind, Model
+    MessageKind, Model, StreamingState, FocusState
 };
 
 const SPINNER_GLYPHS: [char; 4] = ['|', '/', '-', '\\'];
@@ -49,10 +49,13 @@ pub fn draw(f: &mut Frame, model: &mut Model, textarea: &TextArea<'_>) {
 }
 
 fn draw_status(f: &mut Frame, model: &Model, area: Rect) {
-    let spinner_glyph = if model.is_streaming {
-        SPINNER_GLYPHS[model.spinner_index % SPINNER_GLYPHS.len()]
-    } else {
-        ' '
+    let spinner_glyph = match model.streaming_state() {
+        StreamingState::Streaming | StreamingState::AwaitingStream => {
+            SPINNER_GLYPHS[model.spinner_index % SPINNER_GLYPHS.len()]
+        },
+        _ => {
+            ' '
+        }
     };
 
     let text = format!("{} {}", model.status, spinner_glyph);
@@ -92,7 +95,7 @@ fn draw_chat(f: &mut Frame, model: &mut Model, textarea: &TextArea<'_>, area: Re
     let inner_width = area.width.saturating_sub(2).max(1) as usize;
     let chat_len = model.chat.len();
 
-    let focused_on_input = model.focus == Some(chat_len);
+    let focused_on_input = model.focus_state() == FocusState::Focused(chat_len);
     let input_height: u16 = if focused_on_input {
         (textarea.lines().len() as u16 + 2).max(3)
     } else {
@@ -102,13 +105,16 @@ fn draw_chat(f: &mut Frame, model: &mut Model, textarea: &TextArea<'_>, area: Re
     let all_heights: Vec<u16> = model.chat.iter()
         .enumerate()
         .map(|(i, m)| {
-            if model.focus == Some(i) {
-                let lines = textarea.lines().join("\n");
-                let textarea_height = wrap_text(&lines, inner_width).len();
+            match model.focus_state() {
+                FocusState::Focused(foc) if foc == i => {
+                    let lines = textarea.lines().join("\n");
+                    let textarea_height = wrap_text(&lines, inner_width).len();
 
-                (textarea_height as u16 + 2).max(3)
-            } else {
-                height_of_msg(m, inner_width)
+                    (textarea_height as u16 + 2).max(3)
+                },
+                _ => {
+                    height_of_msg(m, inner_width)
+                }
             }
         })
         .chain(std::iter::once(input_height))
@@ -122,22 +128,27 @@ fn draw_chat(f: &mut Frame, model: &mut Model, textarea: &TextArea<'_>, area: Re
         model.should_follow = true;
     }
 
-    let focused_snap_scroll = model.focus.map(|idx| {
-        let focused_offset: u16 = all_heights[..idx].iter().sum();
-        let focused_height = all_heights[idx];
-        let s = if focused_height <= area.height {
-            (focused_offset + focused_height).saturating_sub(area.height)
-        } else {
-            focused_offset
-        };
-        s.min(max_scroll)
-    });
+    let focused_snap_scroll = match model.focus_state() {
+        FocusState::Focused(i) => {
+            let focused_offset: u16 = all_heights[..i].iter().sum();
+            let focused_height = all_heights[i];
+            let s = if focused_height <= area.height {
+                (focused_offset + focused_height).saturating_sub(area.height)
+            } else {
+                focused_offset
+            };
+            s.min(max_scroll)
+        },
+        _ => {
+            max_scroll
+        }
+    };
 
     let scroll_offset = if model.should_snap {
-        tracing::info!("view snapped to offset {}", focused_snap_scroll.unwrap_or(max_scroll));
+        tracing::info!("view snapped to offset {}", focused_snap_scroll);
 
         model.should_snap = false;
-        focused_snap_scroll.unwrap_or(max_scroll)
+        focused_snap_scroll
     } else if model.should_follow {
         tracing::info!("view following");
 
@@ -176,10 +187,13 @@ fn draw_chat(f: &mut Frame, model: &mut Model, textarea: &TextArea<'_>, area: Re
             height: rendered_height,
         };
 
-        if model.focus == Some(i) {
-            f.render_widget(textarea, msg_area);
-        } else {
-            draw_message(f, msg, model, msg_area, line_skip);
+        match model.focus_state() {
+            FocusState::Focused(foc) if foc == i => {
+                f.render_widget(textarea, msg_area);
+            },
+            _ => {
+                draw_message(f, msg, model, msg_area, line_skip);
+            }
         }
 
         y += rendered_height;
@@ -230,7 +244,9 @@ fn draw_message(f: &mut Frame, msg: &model::Message, model: &Model, area: Rect, 
                 .style(assistant_style)
                 .padding(Padding::new(1, 1, top_pad, 1));
 
-            let body = if msg.content.is_empty() && model.is_streaming {
+            let body = if msg.content.is_empty()
+                && model.streaming_state() == StreamingState::AwaitingStream
+            {
                 "..."
             } else {
                 msg.content.as_str()
@@ -283,7 +299,14 @@ fn draw_message(f: &mut Frame, msg: &model::Message, model: &Model, area: Rect, 
 }
 
 fn draw_input_placeholder(f: &mut Frame, model: &Model, area: Rect) {
-    let text = if model.is_streaming { "..." } else { "" };
+    let text = match model.streaming_state() {
+        StreamingState::Streaming | StreamingState::AwaitingStream => {
+            "..."
+        },
+        _ => {
+            ""
+        }
+    };
 
     let block = Block::default()
         .padding(Padding::new(1, 1, 0, 1))
