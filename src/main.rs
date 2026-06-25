@@ -21,7 +21,7 @@ use futures::StreamExt;
 use crossterm::{
     event::{
         DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyCode, KeyEvent,
-        KeyEventKind, KeyModifiers
+        KeyEventKind, KeyModifiers, MouseEvent
     },
     terminal::{
         self, EnterAlternateScreen, LeaveAlternateScreen
@@ -93,11 +93,16 @@ where
         t.draw(|f| cli::draw(f, &mut model, &input_box))?;
 
         tokio::select! {
-            maybe = events.next() => {
-                if let Some(Ok(Event::Key(key))) = maybe
-                    && key.kind == KeyEventKind::Press
-                {
-                    handle_key(&mut model, &mut input_box, key, &ec);
+            term_event = events.next() => {
+                match term_event {
+                    Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
+                        handle_key(&mut model, &mut input_box, key, &ec);   
+                    },
+                    Some(Ok(Event::Mouse(mouse))) => {
+                        handle_mouse(&mut model, &mut input_box, mouse);
+                    },
+                    _ => {
+                    }
                 }
             },
 
@@ -106,7 +111,7 @@ where
                     model.push_stream_token(&t)
                 },
                 llm::Event::Done => {
-                    model.stop_stream();
+                    model.finish_stream();
                 },
                 llm::Event::Error(e) => {
                     model.error_stream(&e)
@@ -129,6 +134,23 @@ where
     }
 
     Ok(())
+}
+
+fn handle_mouse(
+    model: &mut Model,
+    textarea: &mut TextArea<'_>,
+    mouse: MouseEvent,
+) {
+    match mouse.kind {
+        crossterm::event::MouseEventKind::ScrollDown => {
+            model.scroll_down();
+        },
+        crossterm::event::MouseEventKind::ScrollUp => {
+            model.scroll_up();
+        },
+        _ => {
+        }
+    }
 }
 
 fn handle_key(
@@ -237,7 +259,8 @@ fn handle_key(
         }
     }
 
-    if key.code != KeyCode::Char('c') || !key.modifiers.contains(KeyModifiers::CONTROL) {
+    if key.code != KeyCode::Char('c')
+    || !key.modifiers.contains(KeyModifiers::CONTROL) {
         model.cancel_quit();
         model.set_aux_status(None);
     }

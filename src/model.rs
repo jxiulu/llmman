@@ -8,19 +8,38 @@ pub enum MessageKind {
     Error,
 }
 
+#[derive(Clone)]
 pub struct Message {
     pub kind: MessageKind,
     pub content: String,
 }
 
+#[derive(PartialEq, Eq, Clone)]
+pub enum StreamingState {
+    Streaming,
+    AwaitingStream,
+    Idle,
+}
+
+#[derive(PartialEq, Eq, Clone)]
+pub enum UiState {
+    Focused(usize),
+    Unfocused
+}
+
 pub struct Model {
     pub chat: Vec<Message>,
 
+    /// this field should hold the number of rows from the top that the view is offset,
+    /// including any ui padding/whitespace
     pub scroll: u16,
     pub should_follow: bool,
     pub should_snap: bool,
     pub is_streaming: bool,
     pub is_awaiting_stream: bool,
+
+    pub streaming_state: StreamingState,
+    pub ui_state: UiState,
 
     pub status: String,
     pub ui_status: Option<String>,
@@ -40,6 +59,7 @@ impl Model {
             scroll: 0,
             should_follow: true,
             should_snap: false,
+            streaming_state: StreamingState::Idle,
             is_streaming: false,
             is_awaiting_stream: false,
             status: "ready".to_string(),
@@ -48,7 +68,24 @@ impl Model {
             quit_count: 0,
             focus: None,
             input_buffer: String::new(),
+            ui_state: UiState::Focused(0),
         }
+    }
+
+    pub fn streaming_state(&self) -> StreamingState {
+        self.streaming_state.clone()
+    }
+
+    pub fn set_streaming_state(&mut self, s: StreamingState) {
+        self.streaming_state = s;
+    }
+
+    pub fn ui_state(&self) -> UiState {
+        self.ui_state().clone()
+    }
+
+    pub fn set_ui_state(&mut self, s: UiState) {
+        self.ui_state = s;
     }
 
     pub fn set_aux_status(&mut self, status: Option<&str>) {
@@ -69,6 +106,8 @@ impl Model {
 
     pub fn focus_on(&mut self, idx: usize) {
         self.focus = Some(idx);
+
+        self.set_ui_state(UiState::Focused(idx));
         self.should_snap = true;
         self.should_follow = false;
 
@@ -77,6 +116,8 @@ impl Model {
 
     pub fn unfocus(&mut self) {
         self.should_follow = self.focus == Some(self.chat.len());
+
+        self.should_follow = self.ui_state() == UiState::Focused(self.chat.len());
         self.focus = None;
 
         tracing::info!("model unfocused");
@@ -87,11 +128,16 @@ impl Model {
         if self.focus.is_none() {
             self.focus = Some(self.chat.len());
         }
+
+        if self.ui_state() == UiState::Unfocused {
+            self.set_ui_state(UiState::Focused(self.chat.len()));
+        }
         self.should_follow = false;
 
         tracing::info!("model snapped");
     }
 
+    /// the indices that contain valid content to focus on and edit
     pub fn focusable_indices(&self) -> Vec<usize> {
         let mut indices: Vec<usize> = self.chat.iter()
             .enumerate()
@@ -173,7 +219,7 @@ impl Model {
         }
     }
 
-    pub fn stop_stream(&mut self) {
+    pub fn finish_stream(&mut self) {
         self.is_streaming = false;
         self.should_follow = false;
         self.status = "ready".to_string();

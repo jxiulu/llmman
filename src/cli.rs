@@ -15,7 +15,7 @@ use ratatui::{
         Block, Borders, Padding, Paragraph
     },
 };
-use tui_textarea::{TextArea, WrapMode};
+use tui_textarea::{CursorMove, TextArea, WrapMode};
 
 use crate::model::{
     self,
@@ -306,13 +306,14 @@ pub fn new_input_textarea<'a>(content: &str) -> TextArea<'a> {
 
     let mut ta = TextArea::from(lines);
     ta.set_wrap_mode(WrapMode::WordOrGlyph);
+    ta.move_cursor(CursorMove::Bottom);
+    ta.move_cursor(CursorMove::End);
 
     let block = Block::default()
         .padding(Padding::new(1, 1, 0, 1))
         .title(" >>>")
         .bg(Color::Black);
 
-    // ta.set_style(Style::default().fg(Color::White));
     ta.set_block(block);
     ta.set_cursor_line_style(Style::default());
 
@@ -328,6 +329,8 @@ pub fn new_editing_textarea<'a>(content: &str) -> TextArea<'a> {
 
     let mut ta = TextArea::from(lines);
     ta.set_wrap_mode(WrapMode::WordOrGlyph);
+    ta.move_cursor(CursorMove::Bottom);
+    ta.move_cursor(CursorMove::End);
 
     let edit_textarea_style = Style::default()
         .bg(Color::Rgb(80, 90, 100));
@@ -336,7 +339,6 @@ pub fn new_editing_textarea<'a>(content: &str) -> TextArea<'a> {
         .style(edit_textarea_style)
         .padding(Padding::new(1, 1, 1, 1));
 
-    // ta.set_style(Style::default().fg(Color::White));
     ta.set_block(block);
     ta.set_cursor_line_style(Style::default());
 
