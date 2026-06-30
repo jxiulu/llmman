@@ -1,5 +1,6 @@
 *
 
 !.gitignore
-!src/
+!src/**
+!src/widgets/**
 !Cargo.toml
