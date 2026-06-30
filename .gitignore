@@ -1,6 +1,2 @@
-*
-
-!.gitignore
-!src/**
-!src/widgets/**
-!Cargo.toml
+/target/
+.env
