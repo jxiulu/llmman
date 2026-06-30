@@ -3,7 +3,11 @@ use std::fmt::Display;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
     Response,
+
+    /// placeholder for any pending streams without any content (AwaitingStream)
+    ResponsePlaceholder,
     User,
+
     Thinking,
     Error,
 }
@@ -14,6 +18,15 @@ pub struct Message {
     pub content: String,
 }
 
+impl Message {
+    pub fn new(kind: MessageKind, content: &str) -> Self {
+        Self {
+            kind,
+            content: content.to_string()
+        }
+    }
+}
+
 #[derive(PartialEq, Eq, Clone)]
 pub enum StreamingState {
     Streaming,
@@ -21,78 +34,54 @@ pub enum StreamingState {
     Idle,
 }
 
+/// What box is currently being focused on right now
 #[derive(PartialEq, Eq, Clone)]
 pub enum FocusState {
-    Focused(usize),
-    Unfocused
-}
-
-pub enum ScrollState {
-    Following,
-    Fixed(u16)
+    Message(usize),
+    Input
 }
 
 pub struct Model {
-    pub chat: Vec<Message>,
+    pub messages: Vec<Message>,
 
-    /// this field should hold the number of rows from the top that the view is offset,
-    /// including any ui padding/whitespace
-    pub scroll: u16,
-    pub should_follow: bool,
-    pub should_snap: bool,
+    streaming_state: StreamingState,
+    focus_state: FocusState,
 
-    pub streaming_state: StreamingState,
-    pub focus_state: FocusState,
-
-    pub status: String,
-    pub ui_status: Option<String>,
+    pub left_status: String,
+    pub right_status: Option<String>,
 
     pub spinner_index: usize,
 
-    pub quit_count: u16,
+    quit_count: u16,
 
-    pub input_buffer: String,
+    pub input_box: String,
 }
 
 impl Model {
     pub fn new() -> Self {
         Self {
-            chat: Vec::new(),
-            scroll: 0,
-            should_follow: true,
-            should_snap: false,
+            messages: Vec::new(),
             streaming_state: StreamingState::Idle,
-            status: "ready".to_string(),
-            ui_status: None,
+            left_status: "ready".to_string(),
+            right_status: None,
             spinner_index: 0,
             quit_count: 0,
-            input_buffer: String::new(),
-            focus_state: FocusState::Focused(0),
+            input_box: String::new(),
+            focus_state: FocusState::Input,
         }
     }
 
-    pub fn input_buffer(&self) -> &str {
-        &self.input_buffer
+    pub fn content_messages(&self) -> Vec<&Message> {
+        self.messages.iter()
+            .filter(|m| matches!(
+                m.kind,
+                MessageKind::User | MessageKind::Response | MessageKind::Thinking
+            ))
+            .collect()
     }
 
     pub fn streaming_state(&self) -> StreamingState {
         self.streaming_state.clone()
-    }
-
-    pub fn set_streaming_state(&mut self, s: StreamingState) {
-        self.streaming_state = s;
-    }
-
-    pub fn focus_state(&self) -> FocusState {
-        self.focus_state.clone()
-    }
-
-    pub fn set_focus_state(&mut self, s: FocusState) {
-        self.focus_state = s;
-    }
-
-    pub fn set_aux_status(&mut self, status: Option<&str>) {
-        self.ui_status = status.map(|s| s.to_owned());
     }
 
     pub fn increment_quit(&mut self) {
@@ -107,40 +96,18 @@ impl Model {
         self.quit_count > 1
     }
 
-    pub fn focus_on(&mut self, idx: usize) {
-        self.set_focus_state(FocusState::Focused(idx));
-        self.should_snap = true;
-        self.should_follow = false;
-
-        tracing::info!("model told to focus on index {idx}")
-    }
-
-    pub fn unfocus(&mut self) {
-        self.should_follow = self.focus_state() == FocusState::Focused(self.chat.len());
-        self.set_focus_state(FocusState::Unfocused);
-
-        tracing::info!("model unfocused");
-    }
-
-    pub fn snap(&mut self) {
-        self.should_snap = true;
-        if self.focus_state() == FocusState::Unfocused {
-            self.set_focus_state(FocusState::Focused(self.chat.len()));
-        }
-
-        self.should_follow = false;
-
-        tracing::info!("model snapped");
+    pub fn last_index(&self) -> usize {
+        self.messages.len().saturating_sub(1)
     }
 
     /// the indices that contain valid content to focus on and edit
     pub fn focusable_indices(&self) -> Vec<usize> {
-        let mut indices: Vec<usize> = self.chat.iter()
+        let mut indices: Vec<usize> = self.messages.iter()
             .enumerate()
             .filter(|(_, m)| m.kind != MessageKind::Error)
             .map(|(i, _)| i)
             .collect();
-        indices.push(self.chat.len());
+        indices.push(self.messages.len());
         indices
     }
 
@@ -148,35 +115,33 @@ impl Model {
         if self.streaming_state() == StreamingState::Streaming {
             return false;
         }
-        if text.is_empty() && self.chat.is_empty() {
+        if text.is_empty() && self.messages.is_empty() {
             return false;
         }
 
         if !text.is_empty() {
-            self.chat.push(Message {
+            self.messages.push(Message {
                 kind: MessageKind::User,
                 content: text,
             });
         }
 
-        self.chat.push(Message {
-            kind: MessageKind::Response,
+        self.messages.push(Message {
+            kind: MessageKind::ResponsePlaceholder,
             content: String::new(),
         });
 
-        self.set_streaming_state(StreamingState::AwaitingStream);
-        self.should_follow = true;
-        self.set_focus_state(FocusState::Unfocused);
-        self.input_buffer = String::new();
-        self.status = "streaming".to_string();
+        self.streaming_state = StreamingState::AwaitingStream;
+        self.input_box = String::new();
+        self.left_status = "streaming".to_string();
 
         true
     }
 
     pub fn push_think_token(&mut self, token: &str) {
         if self.streaming_state() == StreamingState::AwaitingStream {
-            self.set_streaming_state(StreamingState::Streaming);
-            if let Some(last) = self.chat.last_mut() {
+            self.streaming_state = StreamingState::Streaming;
+            if let Some(last) = self.messages.last_mut() {
                 last.kind = MessageKind::Thinking;
                 last.content = token.to_string();
             }
@@ -184,7 +149,7 @@ impl Model {
             return;
         }
 
-        if let Some(last) = self.chat.last_mut() {
+        if let Some(last) = self.messages.last_mut() {
             last.kind = MessageKind::Thinking;
             last.content.push_str(token);
         }
@@ -192,17 +157,17 @@ impl Model {
 
     pub fn push_stream_token(&mut self, token: &str) {
         if self.streaming_state() == StreamingState::AwaitingStream {
-            self.set_streaming_state(StreamingState::Streaming);
-            if let Some(last) = self.chat.last_mut() {
+            self.streaming_state = StreamingState::Streaming;
+            if let Some(last) = self.messages.last_mut() {
                 last.kind = MessageKind::Response;
                 last.content = token.to_string();
             }
             return;
         }
 
-        if let Some(last) = self.chat.last_mut() {
+        if let Some(last) = self.messages.last_mut() {
             if last.kind == MessageKind::Thinking {
-                self.chat.push(Message {
+                self.messages.push(Message {
                     kind: MessageKind::Response,
                     content: token.to_string(),
                 });
@@ -214,38 +179,65 @@ impl Model {
     }
 
     pub fn finish_stream(&mut self) {
-        self.set_streaming_state(StreamingState::Idle);
-        self.should_follow = false;
-        self.status = "ready".to_string();
+        self.streaming_state = StreamingState::Idle;
+        self.left_status = "ready".to_string();
     }
 
     pub fn error_stream(&mut self, msg: &impl Display) {
-        if let Some(last) = self.chat.last_mut()
+        if let Some(last) = self.messages.last_mut()
             && last.content.is_empty()
         {
-            self.chat.pop();
+            self.messages.pop();
         }
 
-        self.chat.push(Message {
+        self.messages.push(Message {
             kind: MessageKind::Error,
             content: msg.to_string(),
         });
-        self.set_streaming_state(StreamingState::Idle);
-        self.should_follow = false;
-        self.status = "error".to_string();
+        self.streaming_state = StreamingState::Idle;
+        self.left_status = "error".to_string();
     }
 
-    pub fn scroll_up(&mut self) {
-        self.should_follow = false;
-        self.scroll = self.scroll.saturating_sub(1);
+    pub fn focus_state(&self) -> &FocusState {
+        &self.focus_state
     }
 
-    pub fn scroll_down(&mut self) {
-        self.should_follow = false;
-        self.scroll = self.scroll.saturating_add(1);
+    /// safely clamps values
+    pub fn focus_on(&mut self, i: usize) {
+        if i >= self.messages.len() {
+            self.focus_state = FocusState::Input;
+        } else {
+            self.focus_state = FocusState::Message(i);
+        }
     }
 
-    pub fn last_index(&self) -> usize {
-        self.chat.len().saturating_sub(1)
+    pub fn focus_up(&mut self, i: usize) {
+        let current_i = match self.focus_state {
+            FocusState::Message(i) => {
+                i
+            },
+            FocusState::Input => {
+                self.messages.len()
+            },
+        };
+
+        self.focus_on(current_i.saturating_sub(i));
+    }
+
+    pub fn focus_down(&mut self, i: usize) {
+        let current_i = match self.focus_state {
+            FocusState::Message(i) => {
+                i
+            },
+            FocusState::Input => {
+                self.messages.len()
+            },
+        };
+
+        self.focus_on(current_i.saturating_add(i));
+    }
+
+     pub fn focus_on_input(&mut self) {
+        self.focus_state = FocusState::Input
     }
 }

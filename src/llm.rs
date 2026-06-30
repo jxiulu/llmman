@@ -7,6 +7,8 @@ use genai::{
 };
 use tokio::sync::mpsc::UnboundedSender;
 
+use crate::model::{MessageKind, Model};
+
 pub enum Role {
     System,
     User,
@@ -65,6 +67,24 @@ pub struct Request {
     pub min_p: Option<f32>,
 
     pub messages: Vec<Message>,
+}
+
+pub fn build_context(model: &Model) -> Vec<Message> {
+    let mut messages: Vec<Message> = Vec::new();
+
+    for message in model.content_messages() {
+        match message.kind {
+            MessageKind::Response => {
+                messages.push(Message::assistant(&message.content));
+            },
+            MessageKind::User => {
+                messages.push(Message::user(&message.content));
+            },
+            _ => continue,
+        }
+    }
+
+    messages
 }
 
 pub enum Event {

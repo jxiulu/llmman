@@ -1,4 +1,6 @@
 mod llm;
+mod wrapped_text;
+mod widgets;
 mod model;
 mod cli;
 
@@ -14,7 +16,7 @@ use tokio::{
     time
 };
 use std::{
-    io, ops::Deref, time::Duration
+    io, time::Duration
 };
 use futures::StreamExt;
 use crossterm::{
@@ -26,13 +28,12 @@ use crossterm::{
         self, EnterAlternateScreen, LeaveAlternateScreen
     }
 };
-use tui_textarea::TextArea;
 use tracing_appender as ta;
 use tracing_subscriber as ts;
 
 use crate::{
     llm::EndpointController,
-    model::{Model, StreamingState, FocusState}
+    widgets::Scroll,
 };
 
 const MODEL: &str = "glm-5.2";
@@ -80,48 +81,39 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     let (tx, mut rx) = mpsc::unbounded_channel::<llm::Event>();
-    let mut tick = time::interval(Duration::from_millis(500));
+    let mut tick = time::interval(Duration::from_millis(100));
     let mut events = EventStream::new();
 
-    let mut model = Model::new();
+    let mut model = model::Model::new();
     let ec = EndpointController::new(tx);
-
-    let mut input_box = cli::new_input_textarea("");
+    let mut view = cli::ViewState::new();
 
     loop {
-        t.draw(|f| cli::draw(f, &mut model, &input_box))?;
+        view.sync_with(&mut model);
+        t.draw(|f| cli::draw(&mut view, &model, f))?;
 
         tokio::select! {
             term_event = events.next() => {
                 match term_event {
                     Some(Ok(Event::Key(key))) if key.kind == KeyEventKind::Press => {
-                        handle_key(&mut model, &mut input_box, key, &ec);   
+                        handle_key(&mut model, &mut view, key, &ec);
                     },
                     Some(Ok(Event::Mouse(mouse))) => {
-                        handle_mouse(&mut model, &mut input_box, mouse);
+                        handle_mouse(&mut view, mouse);
                     },
-                    _ => {
-                    }
+                    _ => {}
                 }
             },
 
             Some(event) = rx.recv() => match event {
-                llm::Event::Token(t) => {
-                    model.push_stream_token(&t)
-                },
-                llm::Event::Done => {
-                    model.finish_stream();
-                },
-                llm::Event::Error(e) => {
-                    model.error_stream(&e)
-                },
-                llm::Event::ThinkingToken(t) => {
-                    model.push_think_token(&t)
-                },
+                llm::Event::Token(token) => model.push_stream_token(&token),
+                llm::Event::Done => model.finish_stream(),
+                llm::Event::Error(e) => model.error_stream(&e),
+                llm::Event::ThinkingToken(token) => model.push_think_token(&token),
             },
 
             _ = tick.tick() => {
-                if model.streaming_state() == StreamingState::Streaming {
+                if model.streaming_state() == model::StreamingState::Streaming {
                     model.spinner_index = model.spinner_index.wrapping_add(1);
                 }
             }
@@ -135,192 +127,83 @@ where
     Ok(())
 }
 
-fn handle_mouse(
-    model: &mut Model,
-    textarea: &mut TextArea<'_>,
-    mouse: MouseEvent,
-) {
+fn handle_mouse(view: &mut cli::ViewState, mouse: MouseEvent) {
     match mouse.kind {
-        crossterm::event::MouseEventKind::ScrollDown => {
-            model.scroll_down();
-        },
-        crossterm::event::MouseEventKind::ScrollUp => {
-            model.scroll_up();
-        },
-        _ => {
-        }
+        crossterm::event::MouseEventKind::ScrollDown => view.chat.scroll_down(3),
+        crossterm::event::MouseEventKind::ScrollUp => view.chat.scroll_up(3),
+        _ => {}
     }
 }
 
 fn handle_key(
-    model: &mut Model,
-    textarea: &mut TextArea<'_>,
+    model: &mut model::Model,
+    view: &mut cli::ViewState,
     key: KeyEvent,
     ec: &EndpointController,
 ) {
-    // During streaming, only scrolling and quit are allowed.
-    if model.streaming_state() == StreamingState::Streaming
-        || model.streaming_state() == StreamingState::AwaitingStream
+    if model.streaming_state() == model::StreamingState::Streaming
+        || model.streaming_state() == model::StreamingState::AwaitingStream
     {
         match key.code {
-            KeyCode::PageUp => model.scroll_up(),
-            KeyCode::PageDown => model.scroll_down(),
+            KeyCode::PageUp => view.chat.scroll_up(3),
+            KeyCode::PageDown => view.chat.scroll_down(3),
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                 model.increment_quit();
-                model.set_aux_status(Some("press esc again to quit"));
+                model.right_status = Some("press ctrl+c again to quit".to_string());
                 return;
             },
             _ => {},
         }
         model.cancel_quit();
-        model.set_aux_status(None);
+        model.right_status = None;
         return;
     }
 
-    let input_slot = model.chat.len();
-
     match key.code {
         KeyCode::Esc => {
-            model.unfocus();
+            model.focus_on_input();
         },
         KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
             model.increment_quit();
-            model.set_aux_status(Some("press esc again to quit"));
+            model.right_status = Some("press ctrl+c again to quit".to_string());
+            return;
         },
         KeyCode::Tab => {
-            // up (smaller index)
-            navigate_focus(model, textarea, -1);
+            model.focus_up(1);
+            view.chat.scroll = Scroll::Focus;
         },
         KeyCode::BackTab => {
-            navigate_focus(model, textarea, 1);
+            model.focus_down(1);
+            view.chat.scroll = Scroll::Focus;
         },
         KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-            if model.focus_state() == FocusState::Unfocused
-                || model.focus_state() == FocusState::Focused(input_slot)
-            {
-                model.focus_on(input_slot);
-                let text = textarea.lines().join("\n");
-                if model.flush_input(text) {
-                    *textarea = cli::new_input_textarea("");
-
-                    let last = model.chat.len() - 1;
-                    let messages: Vec<llm::Message> = model.chat[..last]
-                        .iter()
-                        .filter_map(llm_message)
-                        .collect();
-
+            if matches!(model.focus_state(), model::FocusState::Input) {
+                view.submit_input(model);
+                if model.streaming_state() == model::StreamingState::AwaitingStream {
+                    let messages = llm::build_context(model);
                     let request = llm::Request {
                         model: MODEL.to_string(),
                         temp: None,
                         top_p: None,
                         top_k: None,
                         min_p: None,
-                        messages
+                        messages,
                     };
-
                     let mut async_ec = ec.clone();
                     tokio::spawn(async move {
-                        async_ec.stream_request(&request).await
+                        async_ec.stream_request(&request).await;
                     });
+                    view.chat.scroll = Scroll::Max;
                 }
-            } else {
-                model.snap();
-                textarea.insert_newline();
             }
         },
-        KeyCode::Enter => {
-            if model.focus_state() == FocusState::Unfocused {
-                model.set_focus_state(FocusState::Focused(input_slot));
-            }
-            model.snap();
-            textarea.insert_newline();
-        },
-        KeyCode::PageUp => {
-            model.scroll_up();
-        },
-        KeyCode::PageDown => {
-            model.scroll_down();
-        },
+        KeyCode::PageUp => view.chat.scroll_up(3),
+        KeyCode::PageDown => view.chat.scroll_down(3),
         _ => {
-            if model.focus_state() == FocusState::Unfocused {
-                *textarea = cli::new_input_textarea(&*model.input_buffer());
-                model.set_focus_state(FocusState::Focused(input_slot));
-            } else {
-                model.snap();
-            }
-            textarea.input(key);
-        },
-    }
-
-    // Sync focused slot content to textarea content
-    if let FocusState::Focused(idx) = model.focus_state() {
-        let content = textarea.lines().join("\n");
-        if idx < model.chat.len() {
-            model.chat[idx].content = content;
-        } else {
-            model.input_buffer = content;
+            view.chat.input(key);
         }
     }
 
-    if key.code != KeyCode::Char('c')
-    || !key.modifiers.contains(KeyModifiers::CONTROL) {
-        model.cancel_quit();
-        model.set_aux_status(None);
-    }
-}
-
-fn navigate_focus(model: &mut Model, textarea: &mut TextArea<'_>, dir: i32) {
-    let focusable = model.focusable_indices();
-    if focusable.is_empty() {
-        return;
-    }
-
-    let next_item = match model.focus_state() {
-        FocusState::Focused(i)
-            if let Some(p) = focusable.iter().position(|pos| pos == &i)
-        => {
-            let len = focusable.len();
-            let index = p as i32 + dir;
-            index.rem_euclid(len as i32) as usize
-        },
-        _ if dir > 0 => {
-            0
-        },
-        _ => {
-            focusable.len() - 1
-        }
-    };
-
-    let next_idx = focusable[next_item];
-
-    let content = content_for_slot(model, next_idx);
-    *textarea = if next_idx == model.chat.len() {
-        cli::new_input_textarea(&content) 
-    } else {
-        cli::new_editing_textarea(&content) 
-    };
-
-    model.focus_on(next_idx);
-}
-
-fn content_for_slot(model: &Model, idx: usize) -> String {
-    if idx < model.chat.len() {
-        model.chat[idx].content.clone()
-    } else {
-        model.input_buffer.clone()
-    }
-}
-
-fn llm_message(m: &model::Message) -> Option<llm::Message> {
-    match m.kind {
-        model::MessageKind::Response => {
-            Some(llm::Message::assistant(&m.content))
-        },
-        model::MessageKind::User => {
-            Some(llm::Message::user(&m.content))
-        },
-        _ => {
-            None
-        }
-    }
+    model.cancel_quit();
+    model.right_status = None;
 }
