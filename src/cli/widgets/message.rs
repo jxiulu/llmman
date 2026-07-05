@@ -1,3 +1,5 @@
+use std::{borrow::Cow, rc::Rc};
+
 use ratatui::{
     prelude::{
         Buffer, Rect
@@ -14,29 +16,53 @@ use ratatui::{
 };
 
 use crate::{
-    model::{
+    cli::widgets::{Chat, VisibilityOpt}, model::{
         self, MessageKind
-    },
-    wrapped_text::WrappedText
+    }
 };
 
-pub struct Message<'a> {
+struct WrappedTextCache {
+    lines: Vec<Rc<str>>,
+    width: usize,
+}
+
+pub struct Message {
     skip: usize,
     kind: MessageKind,
-    content: &'a str,
-    wrapped: Option<WrappedText<'a>>
+    content: Rc<str>,
+    wrapped: Option<WrappedTextCache>,
+    visible: bool,
 }
 
 const PADDING: usize = 2;
 
-impl<'a> Message<'a> {
-    pub fn new(model: &'a model::Message) -> Self {
+impl Message {
+    pub fn new(model: &model::Message, state: &Chat) -> Self {
+        let content: Rc<str> = match (state.visibility_opt(), model.kind) {
+            (VisibilityOpt::NonThinking, MessageKind::Thinking) => {
+                format!(
+                    "Thinking... {} words", model.content.split_whitespace().count()
+                ).into()
+            },
+            (_, MessageKind::ResponsePlaceholder) => {
+                "Waiting for stream...".into()
+            },
+            _ => {
+                model.content.as_str().into()
+            }
+        };
+
         Self {
             skip: 0,
             kind: model.kind,
-            content: &model.content,
-            wrapped: None
+            content,
+            wrapped: None,
+            visible: true,
         }
+    }
+
+    pub fn visible(&self) -> bool {
+        self.visible
     }
 
     pub fn skip(&mut self, lines: usize) {
@@ -44,24 +70,27 @@ impl<'a> Message<'a> {
     }
 
     pub fn height(&self) -> usize {
+        if !self.visible() {
+            return 0;
+        }
+
         self.wrapped.as_ref()
-            .map(|w| w.height().saturating_add(PADDING))
-            .unwrap_or(1)
+            .map(|w| w.lines.len().saturating_add(PADDING))
+            .unwrap_or(1 + PADDING)
     }
 
     /// area width is the TOTAL width given to the widget
-    pub fn init_wrap(&mut self, area_width: usize) -> &[&'a str] {
-        let wrapped = WrappedText::new(self.content, area_width.saturating_sub(PADDING));
+    pub fn init_wrap(&mut self, area_width: usize) {
+        let wrap_width = area_width.saturating_sub(PADDING);
+        let wrapped: Vec<Rc<str>> = textwrap::wrap(&self.content, wrap_width)
+            .into_iter()
+            .map(|c| c.into())
+            .collect();
 
-        self.wrapped = Some(wrapped);
-
-        match &self.wrapped {
-            Some(t) => t.lines(),
-            None => unreachable!()
-        }
+        self.wrapped = Some(WrappedTextCache { lines: wrapped, width: wrap_width});
     }
 
-    fn message_block(&self) -> Block {
+    fn message_block<'a>(&'a self) -> Block<'a> {
         let top_pad: u16 = if self.skip > 0 {
             0
         } else {
@@ -76,7 +105,7 @@ impl<'a> Message<'a> {
                     .padding(Padding::new(1, 1, top_pad, 1))
             },
             MessageKind::ResponsePlaceholder => {
-                let assistant_style = Style::default().bg(Color::Rgb(30, 30, 30));
+                let assistant_style = Style::default().bg(Color::Rgb(20, 20, 20));
                 Block::default()
                     .style(assistant_style)
                     .padding(Padding::new(1, 1, top_pad, 1))
@@ -89,7 +118,9 @@ impl<'a> Message<'a> {
                     .padding(Padding::new(1, 1, top_pad, 1))
             },
             MessageKind::Thinking => {
-                let thinking_style = Style::default().fg(Color::Rgb(125, 125, 125));
+                let thinking_style = Style::default()
+                    .bg(Color::Rgb(20, 20, 20))
+                    .fg(Color::Rgb(125, 125, 125));
 
                 Block::default()
                     .style(thinking_style)
@@ -110,24 +141,21 @@ impl<'a> Message<'a> {
 
 }
 
-impl<'a> Widget for &Message<'a> {
+impl Widget for &Message {
     fn render(self, area: Rect, buf: &mut Buffer)
     where
         Self: Sized
     {
         let content_skip = self.skip.saturating_sub(1);
 
-        let body = match (self.kind, &self.wrapped) {
-            (MessageKind::Error, _) => {
-                vec!["..."]
-            },
-            (_, Some(w)) if w.width() == (area.width as usize).saturating_sub(PADDING) => {
-                w.lines().to_vec()
+        let body: Vec<Cow<str>> = match &self.wrapped {
+            Some(w) if w.width == (area.width as usize)
+                .saturating_sub(PADDING)
+            => {
+                w.lines.iter().map(|r| Cow::Borrowed(r.as_ref())).collect()
             },
             _ => {
-                WrappedText::new(self.content, (area.width as usize).saturating_sub(PADDING))
-                    .lines()
-                    .to_vec()
+                textwrap::wrap(&self.content, area.width.saturating_sub(2) as usize)
             },
         };
 

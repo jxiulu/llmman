@@ -1,4 +1,6 @@
-use std::fmt::Display;
+use std::{default, fmt::Display};
+
+use smart_default::SmartDefault;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum MessageKind {
@@ -14,17 +16,9 @@ pub enum MessageKind {
 
 #[derive(Clone)]
 pub struct Message {
+    pub index: usize,
     pub kind: MessageKind,
     pub content: String,
-}
-
-impl Message {
-    pub fn new(kind: MessageKind, content: &str) -> Self {
-        Self {
-            kind,
-            content: content.to_string()
-        }
-    }
 }
 
 #[derive(PartialEq, Eq, Clone)]
@@ -36,17 +30,22 @@ pub enum StreamingState {
 
 /// What box is currently being focused on right now
 #[derive(PartialEq, Eq, Clone)]
-pub enum FocusState {
+pub enum Focus {
     Message(usize),
     Input
 }
 
+#[derive(SmartDefault)]
 pub struct Model {
-    pub messages: Vec<Message>,
+    messages: Vec<Message>,
 
+    #[default(StreamingState::Idle)]
     streaming_state: StreamingState,
-    focus_state: FocusState,
 
+    #[default(Focus::Input)]
+    focus: Focus,
+
+    #[default("ready")]
     pub left_status: String,
     pub right_status: Option<String>,
 
@@ -59,16 +58,15 @@ pub struct Model {
 
 impl Model {
     pub fn new() -> Self {
-        Self {
-            messages: Vec::new(),
-            streaming_state: StreamingState::Idle,
-            left_status: "ready".to_string(),
-            right_status: None,
-            spinner_index: 0,
-            quit_count: 0,
-            input_box: String::new(),
-            focus_state: FocusState::Input,
-        }
+        Self::default()
+    }
+
+    pub fn all_messages(&self) -> &Vec<Message> {
+        &self.messages
+    }
+
+    pub fn all_messages_mut(&mut self) -> &mut Vec<Message> {
+        &mut self.messages
     }
 
     pub fn content_messages(&self) -> Vec<&Message> {
@@ -111,7 +109,11 @@ impl Model {
         indices
     }
 
-    pub fn flush_input(&mut self, text: String) -> bool {
+    pub fn num_messages(&self) -> usize {
+        self.messages.len()
+    }
+
+    pub fn new_input(&mut self, text: &str) -> bool {
         if self.streaming_state() == StreamingState::Streaming {
             return false;
         }
@@ -119,14 +121,20 @@ impl Model {
             return false;
         }
 
+        if let Some(m) = self.messages.last() && m.kind == MessageKind::Error {
+            self.messages.pop();
+        }
+
         if !text.is_empty() {
             self.messages.push(Message {
+                index: self.num_messages(),
                 kind: MessageKind::User,
-                content: text,
+                content: text.to_string(),
             });
         }
 
         self.messages.push(Message {
+            index: self.num_messages(),
             kind: MessageKind::ResponsePlaceholder,
             content: String::new(),
         });
@@ -168,6 +176,7 @@ impl Model {
         if let Some(last) = self.messages.last_mut() {
             if last.kind == MessageKind::Thinking {
                 self.messages.push(Message {
+                    index: self.num_messages(),
                     kind: MessageKind::Response,
                     content: token.to_string(),
                 });
@@ -184,13 +193,14 @@ impl Model {
     }
 
     pub fn error_stream(&mut self, msg: &impl Display) {
-        if let Some(last) = self.messages.last_mut()
-            && last.content.is_empty()
+        if let Some(MessageKind::ResponsePlaceholder)
+            = self.messages.last_mut().map(|m| m.kind)
         {
             self.messages.pop();
         }
 
         self.messages.push(Message {
+            index: self.num_messages(),
             kind: MessageKind::Error,
             content: msg.to_string(),
         });
@@ -198,25 +208,25 @@ impl Model {
         self.left_status = "error".to_string();
     }
 
-    pub fn focus_state(&self) -> &FocusState {
-        &self.focus_state
+    pub fn focus(&self) -> &Focus {
+        &self.focus
     }
 
     /// safely clamps values
     pub fn focus_on(&mut self, i: usize) {
         if i >= self.messages.len() {
-            self.focus_state = FocusState::Input;
+            self.focus = Focus::Input;
         } else {
-            self.focus_state = FocusState::Message(i);
+            self.focus = Focus::Message(i);
         }
     }
 
     pub fn focus_up(&mut self, i: usize) {
-        let current_i = match self.focus_state {
-            FocusState::Message(i) => {
+        let current_i = match self.focus {
+            Focus::Message(i) => {
                 i
             },
-            FocusState::Input => {
+            Focus::Input => {
                 self.messages.len()
             },
         };
@@ -225,11 +235,11 @@ impl Model {
     }
 
     pub fn focus_down(&mut self, i: usize) {
-        let current_i = match self.focus_state {
-            FocusState::Message(i) => {
+        let current_i = match self.focus {
+            Focus::Message(i) => {
                 i
             },
-            FocusState::Input => {
+            Focus::Input => {
                 self.messages.len()
             },
         };
@@ -237,7 +247,7 @@ impl Model {
         self.focus_on(current_i.saturating_add(i));
     }
 
-     pub fn focus_on_input(&mut self) {
-        self.focus_state = FocusState::Input
+    pub fn focus_on_input(&mut self) {
+        self.focus = Focus::Input
     }
 }

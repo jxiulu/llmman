@@ -11,15 +11,9 @@ pub trait WrapText<'a> {
     fn wrapped_lines(&'a self, width: usize) -> Vec<&'a str>;
 }
 
-impl<'a> WrapText<'a> for &'a str {
+impl<'a> WrapText<'a> for str {
     fn wrapped_lines(&'a self, width: usize) -> Vec<&'a str> {
         wrap_text(self, width)
-    }
-}
-
-impl<'a> WrapText<'a> for &'a String {
-    fn wrapped_lines(&'a self, width: usize) -> Vec<&'a str> {
-        wrap_text(&self, width)
     }
 }
 

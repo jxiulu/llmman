@@ -11,7 +11,7 @@ use ratatui::{
 
 use crate::{
     model::Model,
-    widgets::{
+    cli::widgets::{
         Chat, ChatWidget, StatusBar
     }
 };
@@ -29,16 +29,15 @@ impl ViewState {
 
     pub fn submit_input(&mut self, model: &mut Model) {
         let input = self.chat.lines().join("\n");
-        if model.flush_input(input) {
+        if model.new_input(&input) {
             self.chat.clear_input();
             model.focus_on_input();
         }
     }
+}
 
-    /// syncs anything necessary. call before every draw
-    pub fn sync_with(&mut self, model: &mut Model) {
-        self.chat.sync(model);
-    }
+pub fn sync(view: &mut ViewState, model: &mut Model) {
+    view.chat.sync(model);
 }
 
 pub fn draw(state: &mut ViewState, model: &Model, f: &mut Frame) {

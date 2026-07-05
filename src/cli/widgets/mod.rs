@@ -1,5 +1,8 @@
 mod chat;
 pub use chat::*;
+pub mod scroll;
+
+
 mod status_bar;
 pub use status_bar::*;
 mod input_box;

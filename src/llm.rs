@@ -2,12 +2,11 @@ use std::fmt::Display;
 
 use futures::StreamExt;
 use genai::{
-    Client,
-    chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent},
+    Client, adapter::AdapterKind, chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent}, resolver::{AuthData, AuthResolver}
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::model::{MessageKind, Model};
+use crate::{app_data::config::ApiKeys, model::{MessageKind, Model}};
 
 pub enum Role {
     System,
@@ -95,12 +94,12 @@ pub enum Event {
 }
 
 #[derive(Clone)]
-pub struct EndpointController {
+pub struct StreamingEndpoint {
     pub client: Client,
     pub tx: UnboundedSender<Event>,
 }
 
-impl EndpointController {
+impl StreamingEndpoint {
     pub fn new(tx: UnboundedSender<Event>) -> Self {
         Self {
             client: Client::default(),
@@ -108,11 +107,32 @@ impl EndpointController {
         }
     }
 
-    pub async fn stream_request(&mut self, request: &Request) {
-        let (chat_req, options) = extract_request_fields(request);
+    pub fn with_api_keys(self, keys: &ApiKeys) -> Self {
+        let keys = keys.clone();
+        let auth_resolver = AuthResolver::from_resolver_fn(move |iden: genai::ModelIden| {
+            let key = match iden.adapter_kind {
+                AdapterKind::Zai => keys.zai.clone(),
+                AdapterKind::Gemini => keys.gemini.clone(),
+                _ => None,
+            };
 
-        let res = match self
-            .client
+            Ok(key.map(AuthData::from_single))
+        });
+
+        let client = genai::Client::builder()
+            .with_auth_resolver(auth_resolver)
+            .build();
+
+        Self {
+            client,
+            ..self
+        }
+    }
+
+    pub async fn stream_request(&mut self, request: &Request) {
+        let (chat_req, options) = to_genai_request(request);
+
+        let res = match self.client
             .exec_chat_stream(&request.model, chat_req, Some(&options))
             .await
         {
@@ -160,7 +180,7 @@ impl EndpointController {
     }
 }
 
-fn extract_request_fields(req: &Request) -> (ChatRequest, ChatOptions) {
+fn to_genai_request(req: &Request) -> (ChatRequest, ChatOptions) {
     let messages: Vec<ChatMessage> = req
         .messages
         .iter()
