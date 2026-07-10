@@ -1,5 +1,6 @@
-mod cli;
-pub use cli::*;
+mod window;
+pub use window::*;
+
 pub mod widgets;
 
 pub mod editor;

@@ -1,7 +1,17 @@
-use ratatui::{prelude::{Buffer, Rect}, style::{Color, Style, Stylize}, widgets::{Block, Padding, Widget}};
-use tui_textarea::{CursorMove, Input, Scrolling, TextArea, WrapMode};
-
-use crate::wrapped_text::WrapText;
+use ratatui::{
+    prelude::{
+        Buffer, Rect
+    },
+    style::{
+        Color, Style, Stylize
+    }, 
+    widgets::{
+        Block, Padding, Widget
+    }
+};
+use tui_textarea::{
+    CursorMove, Input, TextArea, WrapMode
+};
 
 /// state-tracked
 #[derive(Clone)]
@@ -23,10 +33,7 @@ impl InputBox {
     }
 
     pub fn total_widget_height(&self, w: usize) -> usize {
-        self.lines().join("\n")
-            .wrapped_lines(w)
-            .len()
-            .saturating_add(2)
+        textwrap::wrap(&self.lines().join("\n"), w).len().saturating_add(2)
     }
 
     pub fn new(content: &str) -> Self {

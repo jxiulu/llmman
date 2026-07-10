@@ -1,8 +1,8 @@
 use std::{
     io::{
-        self, Stdout
+        self
     },
-    time::Duration
+    time::{Instant, Duration}
 };
 
 use futures::{
@@ -21,7 +21,9 @@ use crossterm::{
         DisableMouseCapture, EnableMouseCapture, Event, EventStream,
         KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent, MouseEventKind
     },
-    terminal::{self, EnterAlternateScreen, LeaveAlternateScreen}
+    terminal::{
+        self, EnterAlternateScreen, LeaveAlternateScreen
+    }
 };
 use ratatui::{
     Terminal,
@@ -36,12 +38,18 @@ use tracing_appender::{
 use tracing_subscriber as ts;
 
 use crate::{
-    AppData, app_data::{self, config}, cli::{
-        self, ViewState, widgets::scroll::ScrollOpt
-    }, llm::{
+    AppData,
+    save_data::{
+        self
+    },
+    cli::{
+        self, Window, widgets::Scroll
+    },
+    llm::{
         self, StreamingEndpoint
-    }, model::{
-        self, Model, StreamingState
+    },
+    model::{
+        self, Focus, Model, NotificationKind, StreamActivity
     }
 };
 
@@ -55,7 +63,7 @@ pub fn setup() -> eyre::Result<()> {
 }
 
 pub fn setup_tracing_subscriber() -> WorkerGuard {
-    let path = app_data::dirs().saves();
+    let path = save_data::dirs().saves();
 
     let file_appender = ta::rolling::never(path, "setboy.log");
     let (non_blocking, guard) = ta::non_blocking(file_appender);
@@ -94,8 +102,10 @@ pub enum CliEvent {
 pub struct App<B: Backend> {
     appdata: AppData,
     model: Model,
-    view: ViewState,
-    terminal: Terminal<B>
+    window: Window,
+    terminal: Terminal<B>,
+    quit_pending: Option<Instant>,
+    quit_count: usize,
 }
 
 impl<B: Backend + io::Write> App<B>
@@ -103,13 +113,15 @@ where
     B::Error: std::error::Error + Send + Sync + 'static,
 {
     pub fn new(backend: B, appdata: AppData) -> eyre::Result<Self> {
-        let t = Terminal::new(backend)?;
+        let terminal = Terminal::new(backend)?;
 
         Ok(Self {
             appdata,
             model: Model::new(),
-            view: ViewState::new(),
-            terminal: t
+            window: Window::new(),
+            terminal,
+            quit_pending: None,
+            quit_count: 0,
         })
     }
 
@@ -125,11 +137,43 @@ where
         Ok(())
     }
 
+    pub fn tick(&mut self) {
+        self.model.tick();
+
+        if self.model.stream_active() {
+            self.model.spinner_index = self.model.spinner_index.wrapping_add(1);
+        }
+
+        if let Some(x) = self.quit_pending && x <= Instant::now() {
+            self.quit_pending = None;
+            self.quit_count = 0;
+        }
+    }
+
+    pub fn increment_quit(&mut self) {
+        const QUIT_TIMEOUT: Duration = Duration::from_secs(2);
+
+        self.quit_count += 1;
+        if self.quit_pending.is_none() {
+            self.quit_pending = Some(Instant::now() + QUIT_TIMEOUT);
+            self.model.notify(
+                NotificationKind::Info,
+                "press ctrl-c again to quit",
+                QUIT_TIMEOUT
+            );
+        }
+    }
+
+    pub fn should_quit(&self) -> bool {
+        self.quit_count > 1
+    }
+
     pub async fn run(&mut self) -> color_eyre::Result<()> {
         let (tx, rx) = mpsc::unbounded_channel::<llm::Event>();
         let tick = time::interval(Duration::from_millis(100));
 
-        let ec = StreamingEndpoint::new(tx);
+        let ec = StreamingEndpoint::new(tx)
+            .with_api_keys(&self.appdata.config.api_keys);
 
         let term_stream = EventStream::new()
             .filter_map(|e| async { e.ok().map(CliEvent::Term) });
@@ -145,25 +189,18 @@ where
         tokio::pin!(app_events);
 
         loop {
-            cli::sync(&mut self.view, &mut self.model);
-            self.terminal.draw(|f| cli::draw(&mut self.view, &self.model, f))?;
+            cli::sync(&mut self.window, &mut self.model);
+            self.terminal.draw(|f| cli::draw(&mut self.window, &self.model, f))?;
 
             if let Some(event) = app_events.next().await {
                 match event {
                     CliEvent::Term(e) => self.handle_term_event(e, &ec),
                     CliEvent::Llm(e) => Self::handle_llm_event(&mut self.model, e),
-                    CliEvent::Tick => {
-                        if matches!(
-                            self.model.streaming_state(),
-                            StreamingState::AwaitingStream | StreamingState::Streaming
-                        ) {
-                            self.model.spinner_index = self.model.spinner_index.wrapping_add(1);
-                        }
-                    }
+                    CliEvent::Tick => self.tick()
                 }
             }
 
-            if self.model.should_quit() {
+            if self.should_quit() {
                 break;
             }
         }
@@ -176,7 +213,7 @@ where
             Event::Key(key) if key.kind == KeyEventKind::Press => {
                 self.handle_key(key, ec);
             }
-            Event::Mouse(mouse) => Self::handle_mouse(&mut self.view, mouse),
+            Event::Mouse(mouse) => Self::handle_mouse(&mut self.window, mouse),
             _ => {}
         }
     }
@@ -190,7 +227,7 @@ where
         }
     }
 
-    fn handle_mouse(view: &mut ViewState, mouse: MouseEvent) {
+    fn handle_mouse(view: &mut Window, mouse: MouseEvent) {
         match mouse.kind {
             MouseEventKind::ScrollDown => view.chat.scroll_down(3),
             MouseEventKind::ScrollUp => view.chat.scroll_up(3),
@@ -199,45 +236,44 @@ where
     }
 
     fn handle_key(&mut self, key: KeyEvent, ec: &StreamingEndpoint) {
+        // always available
         match key.code {
             KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.model.increment_quit();
-                self.model.right_status = Some("press ctrl+c again to quit".to_string());
-                return;
+                self.increment_quit();
             }
-            _ => {
-                self.model.cancel_quit();
-                self.model.right_status = None;
+            KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.window.chat.toggle_vis();
             }
-        }
-
-        if self.model.streaming_state() == model::StreamingState::Streaming
-            || self.model.streaming_state() == model::StreamingState::AwaitingStream
-        {
-            match key.code {
-                KeyCode::PageUp => self.view.chat.scroll_up(3),
-                KeyCode::PageDown => self.view.chat.scroll_down(3),
-                _ => {}
+            KeyCode::Esc if let Focus::Edit(i) = self.model.current_focus() => {
+                self.model.set_focus(Focus::Select(*i));
             }
-            return;
-        }
-
-        match key.code {
-            KeyCode::Esc => {
-                self.model.focus_on_input();
+            KeyCode::Esc if matches!(
+                self.model.current_focus(),
+                Focus::Select(_) | Focus::Input
+            ) => {
+                self.model.set_focus(Focus::Input);
             }
             KeyCode::Tab => {
-                self.model.focus_up(1);
-                self.view.chat.scroll = ScrollOpt::Focus;
+                self.model.move_focus_up(1);
+                self.window.chat.scroll = Scroll::Focus;
             }
             KeyCode::BackTab => {
-                self.model.focus_down(1);
-                self.view.chat.scroll = ScrollOpt::Focus;
+                self.model.move_focus_down(1);
+                self.window.chat.scroll = Scroll::Focus;
             }
-            KeyCode::Enter if key.modifiers.contains(KeyModifiers::ALT) => {
-                if matches!(self.model.focus(), model::Focus::Input) {
-                    self.view.submit_input(&mut self.model);
-                    if self.model.streaming_state() == model::StreamingState::AwaitingStream {
+            KeyCode::Enter
+                if let Focus::Select(i) = self.model.current_focus() 
+                && !self.model.stream_active()
+            => {
+                self.model.set_focus(Focus::Edit(*i));
+            }
+            KeyCode::Enter
+                if key.modifiers.contains(KeyModifiers::ALT) 
+                && !self.model.stream_active()
+            => {
+                if self.model.current_focus() == &model::Focus::Input {
+                    self.window.submit_input(&mut self.model);
+                    if self.model.streaming_state() == StreamActivity::AwaitingStream {
                         let messages = llm::build_context(&self.model);
                         let request = llm::Request {
                             model: MODEL.to_string(),
@@ -251,14 +287,23 @@ where
                         tokio::spawn(async move {
                             async_ec.stream_request(&request).await;
                         });
-                        self.view.chat.scroll = ScrollOpt::Max;
+                        self.window.chat.scroll = Scroll::Max;
+                        self.model.stop_editing_current();
                     }
                 }
             }
-            KeyCode::PageUp => self.view.chat.scroll_up(3),
-            KeyCode::PageDown => self.view.chat.scroll_down(3),
+            KeyCode::PageUp => self.window.chat.scroll_up(3),
+            KeyCode::PageDown => self.window.chat.scroll_down(3),
             _ => {
-                self.view.chat.input(key);
+                if self.model.stream_active() {
+                    return;
+                }
+
+                if let Focus::Select(_) = self.model.current_focus() {
+                    self.model.set_focus(Focus::Input);
+                }
+
+                self.window.chat.input(key);
             }
         }
     }

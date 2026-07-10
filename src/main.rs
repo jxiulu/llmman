@@ -1,18 +1,16 @@
 mod llm;
-mod wrapped_text;
 mod model;
 mod cli;
-mod app_data;
+mod save_data;
 
 use color_eyre as eyre;
 use ratatui::backend::CrosstermBackend;
 
-use std::
-    io::{self}
-;
+use std::io;
 
-use crate::app_data::config::{self, Config};
+use crate::save_data::config::{self, Config};
 
+#[derive(Default)]
 pub struct AppData {
     config: Config
 }

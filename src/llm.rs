@@ -2,11 +2,23 @@ use std::fmt::Display;
 
 use futures::StreamExt;
 use genai::{
-    Client, adapter::AdapterKind, chat::{ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent}, resolver::{AuthData, AuthResolver}
+    Client,
+    adapter::AdapterKind,
+    chat::{
+        ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent
+    },
+    resolver::{
+        AuthData, AuthResolver
+    }
 };
 use tokio::sync::mpsc::UnboundedSender;
 
-use crate::{app_data::config::ApiKeys, model::{MessageKind, Model}};
+use crate::{
+    save_data::config::ApiKeys,
+    model::{
+        MessageKind, Model
+    }
+};
 
 pub enum Role {
     System,

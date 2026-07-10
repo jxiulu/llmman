@@ -10,6 +10,7 @@ pub struct AppDirectories {
     config: PathBuf,
     saves: PathBuf,
 }
+
 impl AppDirectories {
     pub fn config(&self) -> &Path {
         &self.config

@@ -1,4 +1,6 @@
-use std::{env, fs, process::Command};
+use std::{
+    env, fs, process::Command
+};
 
 use color_eyre as eyre;
 

@@ -15,10 +15,11 @@ use ratatui::{
     }
 };
 
-use crate::{
-    cli::widgets::{Chat, VisibilityOpt}, model::{
-        self, MessageKind
-    }
+use crate::model::{
+    self, MessageKind, Focus
+};
+use super::{
+    Chat, VisMode
 };
 
 struct WrappedTextCache {
@@ -27,9 +28,12 @@ struct WrappedTextCache {
 }
 
 pub struct Message {
+    index: usize,
     skip: usize,
     kind: MessageKind,
+    selected: bool,
     content: Rc<str>,
+     
     wrapped: Option<WrappedTextCache>,
     visible: bool,
 }
@@ -37,24 +41,26 @@ pub struct Message {
 const PADDING: usize = 2;
 
 impl Message {
-    pub fn new(model: &model::Message, state: &Chat) -> Self {
-        let content: Rc<str> = match (state.visibility_opt(), model.kind) {
-            (VisibilityOpt::NonThinking, MessageKind::Thinking) => {
-                format!(
-                    "Thinking... {} words", model.content.split_whitespace().count()
-                ).into()
+    pub fn new(msg: &model::Message, state: &Chat) -> Self {
+        let content: Rc<str> = match msg.kind {
+            MessageKind::Thinking if state.vis_mode() == &VisMode::NonThinking => {
+                format!("Thinking... {} words", msg.content.split_whitespace().count())
+                    .into()
             },
-            (_, MessageKind::ResponsePlaceholder) => {
-                "Waiting for stream...".into()
-            },
-            _ => {
-                model.content.as_str().into()
-            }
+            MessageKind::ResponsePlaceholder => "Waiting for response...".into(),
+            _ => msg.content.as_str().into()
         };
 
+        let selected = matches!(
+            state.focus_state,
+            Focus::Select(i) if i == msg.index
+        );
+
         Self {
+            index: msg.index,
             skip: 0,
-            kind: model.kind,
+            kind: msg.kind,
+            selected,
             content,
             wrapped: None,
             visible: true,
@@ -90,52 +96,67 @@ impl Message {
         self.wrapped = Some(WrappedTextCache { lines: wrapped, width: wrap_width});
     }
 
+    fn mod_color(&self, r: u8, g: u8, b: u8) -> Color {
+        let m: f32 = if self.selected { 1.4 } else { 1.0 };
+
+        Color::Rgb(
+            (r as f32 * m).round() as u8, 
+            (g as f32 * m).round() as u8,
+            (b as f32 * m).round() as u8
+        )
+    }
+
     fn message_block<'a>(&'a self) -> Block<'a> {
-        let top_pad: u16 = if self.skip > 0 {
-            0
-        } else {
-            1
-        };
-        match self.kind {
+        let top_pad: u16 = if self.skip > 0 { 0 } else { 1 };
+        let block = match self.kind {
             MessageKind::Response => {
-                let assistant_style = Style::default().bg(Color::Rgb(30, 30, 30));
+                let assistant_style = Style::default().bg(self.mod_color(30, 30, 30));
 
                 Block::default()
                     .style(assistant_style)
-                    .padding(Padding::new(1, 1, top_pad, 1))
+                    .padding(Padding::new(1, 1, 0, 1))
             },
             MessageKind::ResponsePlaceholder => {
-                let assistant_style = Style::default().bg(Color::Rgb(20, 20, 20));
+                let assistant_style = Style::default().bg(self.mod_color(20, 20, 20));
+
                 Block::default()
                     .style(assistant_style)
-                    .padding(Padding::new(1, 1, top_pad, 1))
+                    .padding(Padding::new(1, 1, 0, 1))
             },
             MessageKind::User => {
                 let user_style = Style::default()
-                    .bg(Color::Rgb(10, 10, 10));
+                    .bg(self.mod_color(10, 10, 10));
+
                 Block::default()
                     .style(user_style)
-                    .padding(Padding::new(1, 1, top_pad, 1))
+                    .padding(Padding::new(1, 1, 0, 1))
             },
             MessageKind::Thinking => {
                 let thinking_style = Style::default()
-                    .bg(Color::Rgb(20, 20, 20))
+                    .bg(self.mod_color(20, 20, 20))
                     .fg(Color::Rgb(125, 125, 125));
 
                 Block::default()
                     .style(thinking_style)
-                    .padding(Padding::new(1, 1, top_pad, 0))
+                    .padding(Padding::new(1, 1, 0, 0))
             },
             MessageKind::Error => {
                 let error_style = Style::default().bg(Color::Red);
 
-                let title = Line::from("Error").add_modifier(Modifier::BOLD);
-
                 Block::default()
                     .style(error_style)
-                    .title(title)
                     .padding(Padding::new(1, 1, 0, 1))
             },
+        };
+
+        match top_pad {
+            0 => block,
+            _ => {
+                let title = Line::from(format!("{} ", self.index + 1))
+                    .right_aligned()
+                    .fg(Color::Rgb(50, 50, 50));
+                block.title(title)
+            }
         }
     }
 
@@ -149,13 +170,18 @@ impl Widget for &Message {
         let content_skip = self.skip.saturating_sub(1);
 
         let body: Vec<Cow<str>> = match &self.wrapped {
-            Some(w) if w.width == (area.width as usize)
-                .saturating_sub(PADDING)
+            Some(w)
+                if w.width == (area.width as usize).saturating_sub(PADDING)
             => {
-                w.lines.iter().map(|r| Cow::Borrowed(r.as_ref())).collect()
+                w.lines.iter()
+                    .map(|r| Cow::Borrowed(r.as_ref()))
+                    .collect()
             },
             _ => {
-                textwrap::wrap(&self.content, area.width.saturating_sub(2) as usize)
+                textwrap::wrap(
+                    &self.content,
+                    area.width.saturating_sub(PADDING as u16) as usize
+                )
             },
         };
 

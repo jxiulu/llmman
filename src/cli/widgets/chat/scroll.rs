@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// use this to keep a state
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Default)]
 pub struct ScrollPos {
     /// absolute index of a message in the Model
     pub message: usize,
@@ -15,41 +15,42 @@ pub struct ScrollPos {
     pub skip: usize,
 }
 
-#[derive(PartialEq, Eq)]
-pub enum ScrollOpt {
+#[derive(PartialEq, Eq, Default)]
+pub enum Scroll {
+    #[default]
     Max,
+
+    /// please remember to clear this to Delta(0) or something else when done
     Delta(i64),
     Focus,
 }
 
-/// ephemeral. source of truth for message heights: substitutes the input
-/// box's height for whichever message is focused, since that's what
-/// actually gets rendered in its place.
+/// ephemeral. scroll logic
 pub struct ChatCoords<'a> {
     messages: &'a [Message],
-    focused: Option<usize>,
+    editing: Option<usize>,
     input_box_height: usize,
 }
 
 impl<'a> ChatCoords<'a> {
     pub fn from(messages: &'a [Message], focus: &Focus, state: &Chat, area: Rect) -> Self {
-        let focused = match focus {
-            Focus::Message(i) => Some(*i),
-            Focus::Input => None,
+        let editing = match focus {
+            Focus::Edit(i) => Some(*i),
+            _ => None
         };
         let input_box_height = state.input_box_height(area.width as usize);
 
-        Self { messages, focused, input_box_height }
+        Self { messages, editing, input_box_height }
     }
 
     pub fn focused_index(&self) -> Option<usize> {
-        self.focused
+        self.editing
     }
 
     /// height a message actually renders at: the input box's height if
     /// it's the focused message, otherwise its own wrapped content height
     pub fn height(&self, index: usize) -> usize {
-        if Some(index) == self.focused {
+        if Some(index) == self.editing {
             self.input_box_height
         } else {
             self.messages[index].height()

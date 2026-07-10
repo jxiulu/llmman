@@ -9,18 +9,18 @@ use ratatui::{
     widgets::Block
 };
 
-use crate::{
-    model::Model,
-    cli::widgets::{
-        Chat, ChatWidget, StatusBar
-    }
+use super::widgets::{
+    Chat, ChatWidget, StatusBar
 };
 
-pub struct ViewState {
+use crate::model::Model;
+
+#[derive(Default)]
+pub struct Window {
     pub chat: Chat
 }
 
-impl ViewState {
+impl Window {
     pub fn new() -> Self {
         Self {
             chat: Chat::new()
@@ -31,16 +31,15 @@ impl ViewState {
         let input = self.chat.lines().join("\n");
         if model.new_input(&input) {
             self.chat.clear_input();
-            model.focus_on_input();
         }
     }
 }
 
-pub fn sync(view: &mut ViewState, model: &mut Model) {
+pub fn sync(view: &mut Window, model: &mut Model) {
     view.chat.sync(model);
 }
 
-pub fn draw(state: &mut ViewState, model: &Model, f: &mut Frame) {
+pub fn draw(state: &mut Window, model: &Model, f: &mut Frame) {
     let total_area = f.area();
 
     let default_style = Style::default()
@@ -54,7 +53,7 @@ pub fn draw(state: &mut ViewState, model: &Model, f: &mut Frame) {
     let areas = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Max(2), Constraint::Fill(1)
+            Constraint::Max(1), Constraint::Fill(1)
         ])
         .split(total_area);
 
